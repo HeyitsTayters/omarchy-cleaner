@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "io.github.momostifler96.omarchy-cleaner",
   "name": "Omarchy Cleaner",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "momoledev",
-  "description": "Reclaim disk space and memory: caches, package cache, logs, crash dumps, trash, dev caches, Docker leftovers, large files, plus RAM per app with clean quit. Bar widget + scriptable CLI.",
+  "description": "Reclaim disk space and memory, and check that your work is backed up: caches, package cache, logs, crash dumps, trash, leftover config backups, large files, RAM per app, plus a Checkup of projects, config backup and system health. Bar widget + scriptable CLI.",
   "kinds": [
     "bar-widget"
   ],

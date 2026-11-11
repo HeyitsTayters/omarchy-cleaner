@@ -40,6 +40,7 @@ OC_MODULES=(
   "snapper|Old snapshots|Btrfs snapshots past snapper's own retention rules (snapper cleanup number).|root|0|medium|root"
   "docker|Docker leftovers|Stopped containers, unused networks, dangling images and build cache. Volumes are never touched.|command|0|medium|command"
   "broken-entries|Broken launchers|App launchers and autostart entries whose program no longer exists (moved to Trash).|user|0|low|trash"
+  "leftover-backups|Leftover config backups|Copies like hyprland.lua.bak or shell.json.before-… left in ~/.config by edits and installers (moved to Trash).|user|0|medium|trash"
   "large-files|Large files|Files over the size threshold in your home folders. Review only: move files to Trash one by one.|user|0|high|report"
 )
 
@@ -356,6 +357,36 @@ oc_scan_broken_entries() {
     oc_is_ignored "$file" && continue
     oc_emit "$(stat -c %s "$file")" "$file" "$(basename -- "$file") → missing $prog"
   done
+  return 0
+}
+
+# --- leftover-backups -------------------------------------------------------
+
+# Names that editors, installers and people give to "just in case" copies.
+OC_LEFTOVER_BACKUP_GLOBS=(
+  '*.bak' '*.bak[.-]*' '*.bak[0-9]*' '*.backup' '*.backup-*' '*.orig'
+  '*.before-*' '*.saved-*' '*.lacquer-backup-*' '*-backup-[0-9]*'
+)
+
+oc_scan_leftover_backups() {
+  local cfg="${XDG_CONFIG_HOME:-$HOME/.config}" glob entry
+  [[ -d $cfg ]] || return 0
+  local -a match=()
+  for glob in "${OC_LEFTOVER_BACKUP_GLOBS[@]}"; do
+    ((${#match[@]} > 0)) && match+=(-o)
+    match+=(-name "$glob")
+  done
+  # Plugin folders are git checkouts with their own history, and .git or
+  # node_modules hold files with these names on purpose. A matching folder is
+  # reported whole and not descended into.
+  while IFS= read -r -d '' entry; do
+    [[ -L $entry ]] && continue
+    oc_is_ignored "$entry" && continue
+    # Not oc_emit_path: an empty leftover is still clutter worth listing.
+    oc_emit "$(oc_path_bytes "$entry")" "$entry" "${entry#"$cfg"/}"
+  done < <(find "$cfg" -xdev -mindepth 1 -maxdepth 4 \
+    \( -path "$cfg/omarchy/plugins" -o -path "$OC_CONFIG_DIR" -o -name .git -o -name node_modules \) -prune -o \
+    \( "${match[@]}" \) -prune -print0 2>/dev/null)
   return 0
 }
 

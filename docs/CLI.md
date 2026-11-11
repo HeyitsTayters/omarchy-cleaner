@@ -254,3 +254,22 @@ omarchy-cleaner status --json | jq -r '.selectedBytes'
 omarchy-cleaner scan --json --details
 omarchy-cleaner clean --defaults --dry-run --json
 ```
+
+## checkup
+
+```
+omarchy-cleaner checkup [CHECK...] [--json]
+omarchy-cleaner checkup backup [--json]
+```
+
+Runs read-only checks. Checks: `projects`, `config-backup`, `failed-units`,
+`crashes`, `pacnew`, `config-drift`. A full checkup (no CHECK given) is saved to
+`~/.local/state/omarchy-cleaner/checkup.json`, which the panel watches.
+
+JSON: `{ok, generatedAt, errors, warnings, canBackup, checks: [{id, title,
+description, status, errors, warnings, count, items: [{status, label, detail,
+path}]}]}`. `status` is `ok`, `info`, `warn` or `error`.
+
+`checkup backup` runs the config backup command (`backupCommand`, or
+`backup.sh` in `configBackupRepo`), then refreshes the checkup. Exit code 4 when
+the backup command fails.

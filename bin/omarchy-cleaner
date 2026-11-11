@@ -16,6 +16,8 @@ source "$OC_ROOT/lib/common.sh"
 source "$OC_ROOT/lib/modules.sh"
 # shellcheck source=lib/memory.sh
 source "$OC_ROOT/lib/memory.sh"
+# shellcheck source=lib/checkup.sh
+source "$OC_ROOT/lib/checkup.sh"
 
 OC_HELPER="$OC_ROOT/bin/omarchy-cleaner-root"
 OC_VERSION=$(jq -r '.version' "$OC_ROOT/manifest.json" 2>/dev/null || echo unknown)
@@ -33,6 +35,8 @@ Usage:
   omarchy-cleaner memory [--limit N] [--json]
   omarchy-cleaner memory quit UNIT [--force] [--yes] [--json]
   omarchy-cleaner memory kill PID [--force] [--yes] [--json]
+  omarchy-cleaner checkup [CHECK...] [--json]
+  omarchy-cleaner checkup backup [--json]
   omarchy-cleaner status [--json]
   omarchy-cleaner modules [--json]
   omarchy-cleaner tasks [--json]
@@ -51,6 +55,7 @@ Global options:
 
 Modules: $(oc_module_ids | paste -sd' ')
 Tasks:   $(for t in "${OC_TASKS[@]}"; do printf '%s ' "${t%%|*}"; done)
+Checks:  $(for c in "${OC_CHECKS[@]}"; do printf '%s ' "${c%%|*}"; done)
 
 Exit codes: 0 ok · 1 error · 2 usage · 3 confirmation required · 4 partial failure
 EOF
@@ -435,6 +440,113 @@ cmd_maintain() {
 }
 
 # ---------------------------------------------------------------------------
+# checkup
+# ---------------------------------------------------------------------------
+
+# Prints one check's result as a compact JSON object.
+check_json() {
+  local id=$1 title desc items
+  IFS='|' read -r _ title desc <<<"$(oc_check_line "$id")"
+  items=$("oc_check_${id//-/_}" 2>/dev/null || true)
+  jq -cn --arg id "$id" --arg title "$title" --arg description "$desc" --arg items "$items" '
+    ($items | split("\n") | map(select(length > 0) | split("\t")
+      | {status: .[0], label: .[1], detail: (.[2] // ""), path: (.[3] // "")})) as $all
+    | ({error: 3, warn: 2, info: 1, ok: 0}) as $rank
+    | {
+        id: $id, title: $title, description: $description,
+        status: (if $id == "config-drift" then (if ($all | length) > 0 then "info" else "ok" end)
+                 else ($all | map(.status) | max_by($rank[.]) // "ok") end),
+        errors: ($all | map(select(.status == "error")) | length),
+        warnings: ($all | map(select(.status == "warn")) | length),
+        count: ($all | length),
+        items: ($all | sort_by(-$rank[.status]))
+      }'
+}
+
+oc_check_line() {
+  local line
+  for line in "${OC_CHECKS[@]}"; do
+    [[ ${line%%|*} == "$1" ]] && { echo "$line"; return 0; }
+  done
+  return 1
+}
+
+cmd_checkup() {
+  if [[ ${POSITIONAL[0]:-} == backup ]]; then
+    checkup_backup
+    return
+  fi
+  local -a ids=("${POSITIONAL[@]}")
+  if ((${#ids[@]} == 0)); then
+    local c
+    for c in "${OC_CHECKS[@]}"; do ids+=("${c%%|*}"); done
+  fi
+  local id checks=""
+  for id in "${ids[@]}"; do
+    oc_check_line "$id" >/dev/null || oc_die "unknown check: $id (known: $(for c in "${OC_CHECKS[@]}"; do printf '%s ' "${c%%|*}"; done))" 2
+  done
+  for id in "${ids[@]}"; do
+    oc_step "Checking $(oc_check_line "$id" | cut -d'|' -f2)…"
+    checks+=$(check_json "$id")$'\n'
+  done
+
+  local result backup_cmd
+  backup_cmd=$(oc_config_backup_command)
+  result=$(jq -cs --arg at "$(date -Iseconds)" --arg backup "$backup_cmd" '{
+      ok: true, generatedAt: $at,
+      errors: (map(.errors) | add // 0), warnings: (map(.warnings) | add // 0),
+      canBackup: ($backup != ""),
+      checks: .
+    }' <<<"$checks")
+
+  if ((${#POSITIONAL[@]} == 0)); then
+    mkdir -p "$OC_STATE_DIR"
+    local tmp
+    tmp=$(mktemp "$OC_STATE_DIR/.checkup.XXXXXX")
+    printf '%s\n' "$result" >"$tmp"
+    mv -f "$tmp" "$OC_CHECKUP_FILE"
+  fi
+
+  if [[ $OC_JSON == 1 ]]; then
+    echo "$result"
+    return 0
+  fi
+  jq -r '.checks[] | "\(.status)\t\(.title)\t\(.count)",
+           (.items[] | select(.status != "ok") | "  \(.status)\t\(.label)\t\(.detail)")' <<<"$result" |
+    while IFS=$'\t' read -r status label detail; do
+      local mark
+      case "${status//[[:space:]]/}" in error) mark="!!" ;; warn) mark=" !" ;; info) mark=" i" ;; *) mark=" -" ;; esac
+      if [[ $status == "  "* ]]; then
+        printf '      %s %s  %s\n' "$mark" "$label" "$detail"
+      else
+        printf '\n  %s %s\n' "$mark" "$label"
+      fi
+    done
+  printf '\n  %s error(s), %s warning(s)\n\n' "$(jq -r .errors <<<"$result")" "$(jq -r .warnings <<<"$result")"
+}
+
+# Runs the config backup command, then refreshes the config-backup check.
+checkup_backup() {
+  local cmd out ok=true
+  cmd=$(oc_config_backup_command)
+  [[ -n $cmd ]] || oc_die "no backup command: set one with 'omarchy-cleaner config set backupCommand PATH'" 1
+  [[ -x ${cmd%% *} ]] || oc_die "backup command is not executable: $cmd" 1
+  oc_step "Backing up configs…"
+  if ! out=$(cd "$(dirname -- "${cmd%% *}")" && $cmd 2>&1); then ok=false; fi
+  (
+    OC_QUIET=1 OC_JSON=1
+    POSITIONAL=()
+    cmd_checkup >/dev/null 2>&1
+  ) || true
+  if [[ $OC_JSON == 1 ]]; then
+    jq -cn --argjson ok "$ok" --arg out "$(tail -n 5 <<<"$out")" '{ok: $ok, output: $out}'
+  else
+    tail -n 5 <<<"$out"
+  fi
+  [[ $ok == true ]] || exit 4
+}
+
+# ---------------------------------------------------------------------------
 # Small commands
 # ---------------------------------------------------------------------------
 cmd_status() {
@@ -512,7 +624,7 @@ cmd_ignore() {
 }
 
 # Configuration keys and their types (documented in docs/CONFIG.md).
-OC_CONFIG_KEYS="pacmanKeep journalMaxMB largeFileMinMB notifyThresholdMB selection ignore"
+OC_CONFIG_KEYS="pacmanKeep journalMaxMB largeFileMinMB notifyThresholdMB selection ignore projectRoots configBackupRepo backupCommand"
 
 cmd_config() {
   local action=${POSITIONAL[0]:-list} key=${POSITIONAL[1]:-} value=${POSITIONAL[2]:-}
@@ -528,7 +640,10 @@ cmd_config() {
       [[ -n $key && -n $value ]] || oc_die "usage: omarchy-cleaner config set KEY VALUE" 2
       [[ " $OC_CONFIG_KEYS " == *" $key "* ]] || oc_die "unknown config key: $key (known: $OC_CONFIG_KEYS)" 2
       case "$key" in
-        selection | ignore)
+        configBackupRepo | backupCommand)
+          oc_config_write '.[$k] = $v' --arg k "$key" --arg v "$value"
+          ;;
+        selection | ignore | projectRoots)
           jq -e 'type == "array"' <<<"$value" >/dev/null 2>&1 || oc_die "$key must be a JSON array, e.g. '[\"user-cache\",\"trash\"]'" 2
           if [[ $key == selection ]]; then
             local sel
@@ -753,6 +868,7 @@ main() {
     clean) cmd_clean ;;
     maintain) cmd_maintain ;;
     status) cmd_status ;;
+    checkup) cmd_checkup ;;
     modules) cmd_modules ;;
     tasks) cmd_tasks ;;
     ignore) cmd_ignore ;;

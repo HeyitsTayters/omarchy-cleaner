@@ -65,7 +65,7 @@ jq -e '.schemaVersion == 1 and (.id | startswith("omarchy.") | not)' "$REPO/mani
 echo "==> CLI basics"
 new_home
 [[ $(cli version) == "$(jq -r .version "$REPO/manifest.json")" ]] && ok "version matches manifest" || ko "version matches manifest"
-cli modules --json | jq -e 'length == 13 and all(has("id") and has("risk"))' >/dev/null && ok "modules --json" || ko "modules --json"
+cli modules --json | jq -e 'length == 14 and all(has("id") and has("risk"))' >/dev/null && ok "modules --json" || ko "modules --json"
 cli tasks --json | jq -e 'length == 6' >/dev/null && ok "tasks --json" || ko "tasks --json"
 "$CLI" scan nope >/dev/null 2>&1; [[ $? == 2 ]] && ok "unknown module exits 2" || ko "unknown module exits 2"
 "$CLI" frobnicate >/dev/null 2>&1; [[ $? == 2 ]] && ok "unknown command exits 2" || ko "unknown command exits 2"
@@ -250,6 +250,56 @@ if [[ -n $REAL_RUNTIME_DIR ]] && command -v systemd-run >/dev/null 2>&1 &&
 else
   echo "  (no systemd user session, app scope test skipped)"
 fi
+
+echo "==> Leftover config backups"
+new_home
+mkdir -p "$HOME/.config/hypr" "$HOME/.config/omarchy/plugins/x" "$HOME/.config/app/old-backup-20260101"
+echo a >"$HOME/.config/hypr/hyprland.lua"
+echo b >"$HOME/.config/hypr/hyprland.lua.bak"
+: >"$HOME/.config/hypr/empty.conf.before-edit"
+echo c >"$HOME/.config/app/old-backup-20260101/f"
+echo d >"$HOME/.config/omarchy/plugins/x/keep.bak"
+echo e >"$HOME/.config/app/user_backup-v2"
+out=$(cli scan leftover-backups --details --json)
+labels=$(jq -r '.modules[0].items[].label' <<<"$out" | sort | paste -sd,)
+[[ $labels == "app/old-backup-20260101,hypr/empty.conf.before-edit,hypr/hyprland.lua.bak" ]] &&
+  ok "finds backup copies, empty ones and backup folders" || ko "finds backup copies, empty ones and backup folders" "$labels"
+cli clean leftover-backups --yes --json >/dev/null
+[[ ! -e $HOME/.config/hypr/hyprland.lua.bak && -e $HOME/.config/hypr/hyprland.lua && -e $HOME/.config/omarchy/plugins/x/keep.bak ]] &&
+  ok "clean trashes leftovers, keeps live files and plugin folders" || ko "clean trashes leftovers, keeps live files and plugin folders"
+[[ -n $(find "$HOME/.local/share/Trash/files" -name 'hyprland.lua.bak*' 2>/dev/null) ]] &&
+  ok "leftovers go to Trash" || ko "leftovers go to Trash"
+
+echo "==> Checkup"
+new_home
+mkdir -p "$HOME/Work/group/loose" "$HOME/Work/norepo"
+echo x >"$HOME/Work/group/loose/f"; echo y >"$HOME/Work/norepo/f"
+g() { git -C "$1" -c user.name=t -c user.email=t@example.invalid "${@:2}" >/dev/null 2>&1; }
+git init -q --bare "$SANDBOX/remote-$$.git"
+for r in pushed local; do
+  git init -q "$HOME/Work/group/$r"; echo 1 >"$HOME/Work/group/$r/a"; g "$HOME/Work/group/$r" add a; g "$HOME/Work/group/$r" commit -m init
+done
+g "$HOME/Work/group/pushed" remote add origin "$SANDBOX/remote-$$.git"
+g "$HOME/Work/group/pushed" push -u origin HEAD
+git init -q "$HOME/Work/fresh"; echo 1 >"$HOME/Work/fresh/a"
+out=$(cli checkup projects --json)
+st() { jq -r --arg l "$1" '.checks[0].items[] | select(.label == $l) | .status' <<<"$out"; }
+[[ $(st "~/Work/group/pushed") == ok ]] && ok "pushed repo is ok" || ko "pushed repo is ok" "$out"
+[[ $(st "~/Work/group/local") == error ]] && ok "repo without remote is an error" || ko "repo without remote is an error" "$out"
+[[ $(st "~/Work/fresh") == error ]] && ok "never-committed repo is an error" || ko "never-committed repo is an error" "$out"
+[[ $(st "~/Work/group/loose") == warn && $(st "~/Work/norepo") == warn ]] && ok "folders outside git are flagged" || ko "folders outside git are flagged" "$out"
+echo 2 >>"$HOME/Work/group/pushed/a"; touch -d '3 days ago' "$HOME/Work/group/pushed/a"
+out=$(cli checkup projects --json)
+[[ $(st "~/Work/group/pushed") == warn ]] && ok "old uncommitted edits warn" || ko "old uncommitted edits warn" "$out"
+touch "$HOME/Work/group/pushed/a"
+out=$(cli checkup projects --json)
+[[ $(st "~/Work/group/pushed") == ok ]] && ok "edits in progress do not warn" || ko "edits in progress do not warn" "$out"
+out=$(cli checkup config-backup --json)
+[[ $(jq -r '.checks[0].status' <<<"$out") == warn && $(jq -r .canBackup <<<"$out") == false ]] &&
+  ok "missing config backup warns" || ko "missing config backup warns" "$out"
+cli checkup --json >/dev/null; [[ -f $HOME/.local/state/omarchy-cleaner/checkup.json ]] &&
+  ok "full checkup writes state" || ko "full checkup writes state"
+cli checkup nope --json >/dev/null; [[ $? == 2 ]] && ok "unknown check is a usage error" || ko "unknown check is a usage error"
 
 echo "==> Root helper"
 "$HELPER" coredumps >/dev/null 2>&1; [[ $? == 1 ]] && ok "helper refuses to run without root" || ko "helper refuses to run without root"

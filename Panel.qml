@@ -18,7 +18,8 @@ import qs.Ui
 //   omarchy-shell io.github.momostifler96.omarchy-cleaner scan
 //   omarchy-shell io.github.momostifler96.omarchy-cleaner cleanDefaults
 //   omarchy-shell io.github.momostifler96.omarchy-cleaner status
-//   omarchy-shell io.github.momostifler96.omarchy-cleaner showMemory | showDisk
+//   omarchy-shell io.github.momostifler96.omarchy-cleaner showMemory | showDisk | showCheckup
+//   omarchy-shell io.github.momostifler96.omarchy-cleaner checkup
 Panel {
   id: root
   moduleName: "io.github.momostifler96.omarchy-cleaner"
@@ -30,6 +31,7 @@ Panel {
   readonly property string cliPath: decodeURIComponent(Qt.resolvedUrl("bin/omarchy-cleaner").toString().replace(/^file:\/\//, ""))
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")
   readonly property string scanFile: stateHome + "/omarchy-cleaner/last-scan.json"
+  readonly property string checkupFile: stateHome + "/omarchy-cleaner/checkup.json"
 
   // ---- Settings (inline in shell.json, see manifest barWidget.schema) ----
   readonly property bool showSize: setting("showSize", false) === true
@@ -49,12 +51,19 @@ Panel {
   property string confirmLabel: "Confirm"
   property var confirmAction: null
 
-  // "disk" or "memory"
+  // "disk", "memory" or "checkup"
   property string tab: "disk"
+  readonly property var tabIds: ["disk", "memory", "checkup"]
+  property var checkup: null           // parsed checkup.json
+  property var checkExpanded: ({})     // check id -> bool
+  property bool checking: false
+  property bool backingUp: false
+  readonly property var checks: checkup && checkup.checks ? checkup.checks : []
+  readonly property int checkupProblems: checkup ? Number(checkup.errors || 0) + Number(checkup.warnings || 0) : 0
   property var memory: null            // parsed `omarchy-cleaner memory --json`
   property var memExpanded: ({})       // unit -> bool
 
-  readonly property bool busy: scanning || cleaning || maintaining
+  readonly property bool busy: scanning || cleaning || maintaining || checking || backingUp
   readonly property var modules: scan && scan.modules ? scan.modules : []
   readonly property var tasks: [
     { id: "font-cache", title: "Font cache" },
@@ -146,6 +155,51 @@ Panel {
     scanning = true
     scanProc.command = ["nice", "-n", "10", cliPath, "scan", "--json", "--quiet"]
     scanProc.running = true
+  }
+
+  function runCheckup() {
+    if (checking || backingUp) return
+    errorText = ""
+    checking = true
+    checkupProc.command = ["nice", "-n", "10", cliPath, "checkup", "--json", "--quiet"]
+    checkupProc.running = true
+  }
+
+  function runBackup() {
+    if (busy) return
+    errorText = ""
+    statusText = "Backing up configs…"
+    backingUp = true
+    backupProc.command = [cliPath, "checkup", "backup", "--json", "--quiet"]
+    backupProc.running = true
+  }
+
+  function applyCheckup(text) {
+    try {
+      var parsed = JSON.parse(String(text || ""))
+      if (parsed && parsed.checks) checkup = parsed
+    } catch (e) {}
+  }
+
+  function toggleCheckExpanded(c) {
+    var next = Object.assign({}, checkExpanded)
+    next[c.id] = !isCheckExpanded(c)
+    checkExpanded = next
+  }
+
+  // Checks with problems start expanded.
+  function isCheckExpanded(c) {
+    if (checkExpanded[c.id] !== undefined) return checkExpanded[c.id] === true
+    return c.status === "error" || c.status === "warn"
+  }
+
+  function statusIcon(status) {
+    // nf-md-check_circle / alert / alert_octagon / information
+    return status === "error" ? "󰀦" : status === "warn" ? "󰀪" : status === "info" ? "󰋼" : "󰄬"
+  }
+
+  function statusColor(status) {
+    return status === "error" ? root.bar.urgent : status === "warn" ? Color.accent : root.bar.foreground
   }
 
   // Ask before any destructive action; `action` runs on confirm.
@@ -266,6 +320,8 @@ Panel {
     function scan(): void { root.runScan() }
     function showMemory(): void { root.tab = "memory"; root.open() }
     function showDisk(): void { root.tab = "disk"; root.open() }
+    function showCheckup(): void { root.tab = "checkup"; root.open() }
+    function checkup(): void { root.runCheckup() }
     function cleanDefaults(): void {
       var ids = []
       for (var i = 0; i < root.modules.length; i++) {
@@ -293,6 +349,44 @@ Panel {
     printErrors: false
     onFileChanged: reload()
     onLoaded: root.applyScan(text())
+  }
+
+  FileView {
+    path: root.checkupFile
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.applyCheckup(text())
+  }
+
+  Process {
+    id: checkupProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyCheckup(String(text || "").trim().split("\n").pop())
+    }
+    onExited: function(exitCode) {
+      root.checking = false
+      if (exitCode !== 0) root.errorText = "Checkup failed (exit " + exitCode + ")"
+    }
+  }
+
+  Process {
+    id: backupProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = root.parseResult(text, null)
+        if (!result) return
+        if (result.error) root.errorText = result.error
+        else root.statusText = result.ok ? "Configs backed up" : "Backup finished with errors"
+      }
+    }
+    onExited: function(exitCode) {
+      root.backingUp = false
+      if (exitCode !== 0 && root.errorText === "") root.errorText = "Backup failed (exit " + exitCode + ")"
+      statusClear.restart()
+    }
   }
 
   Process {
@@ -382,10 +476,17 @@ Panel {
     onTriggered: {
       var age = root.scan && root.scan.generatedAt ? (Date.now() - Date.parse(root.scan.generatedAt)) : Infinity
       if (age > root.autoScanHours * 3600000) root.runScan()
+      var checkAge = root.checkup && root.checkup.generatedAt ? (Date.now() - Date.parse(root.checkup.generatedAt)) : Infinity
+      if (checkAge > root.autoScanHours * 3600000) root.runCheckup()
     }
   }
 
-  onOpenedChanged: if (opened) { confirmOpen = false; confirmAction = null; errorText = ""; if (!scan) runScan() }
+  onOpenedChanged: if (opened) {
+    confirmOpen = false; confirmAction = null; errorText = ""
+    if (!scan) runScan()
+    if (tab === "checkup") runCheckup()
+  }
+  onTabChanged: if (tab === "checkup" && opened) runCheckup()
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -402,10 +503,25 @@ Panel {
     slotSize: Style.bar.iconSlot * ((root.showSize && !vertical && root.scan && root.scan.selectedBytes > 0) ? 2.6 : 1)
     tooltipText: root.busy ? root.statusText
       : (root.scan ? root.humanBytes(root.scan.selectedBytes) + " can be freed" : "Cleaner")
+        + (root.checkupProblems > 0 ? "\n" + root.checkupProblems + " checkup issue" + (root.checkupProblems > 1 ? "s" : "") : "")
     onPressed: function(b) {
       if (b === Qt.RightButton) root.runScan()
       else root.toggle()
     }
+  }
+
+  // Checkup problems: a small dot on the icon (red when work is not backed up
+  // or something failed, accent for warnings only).
+  Rectangle {
+    visible: root.checkupProblems > 0
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    color: root.checkup && root.checkup.errors > 0 ? root.bar.urgent : Color.accent
+    anchors.right: button.right
+    anchors.top: button.top
+    anchors.rightMargin: Style.space(4)
+    anchors.topMargin: Style.space(4)
   }
 
   // ---- Popup panel -------------------------------------------------------
@@ -423,7 +539,11 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.confirmOpen ? (root.confirmOpen = false) : root.close()
-      onMoveRequested: function(dx, dy) { if (dx !== 0 && !root.confirmOpen) root.tab = root.tab === "disk" ? "memory" : "disk" }
+      onMoveRequested: function(dx, dy) {
+        if (dx === 0 || root.confirmOpen) return
+        var i = root.tabIds.indexOf(root.tab)
+        root.tab = root.tabIds[(i + (dx > 0 ? 1 : root.tabIds.length - 1)) % root.tabIds.length]
+      }
       onActivateRequested: if (root.confirmOpen) root.confirmNow()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -472,6 +592,8 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: (root.busy ? root.statusText
+                : root.tab === "checkup"
+                  ? (root.checking ? "Checking…" : root.checkup ? "Checked " + root.ago(root.checkup.generatedAt) : "Not checked yet")
                 : root.tab === "memory"
                   ? (root.memory ? "RAM " + Math.round(root.ramFraction * 100) + "% · available now" : "Reading memory…")
                   : (root.scan ? "Scanned " + root.ago(root.scan.generatedAt) + " · " + root.humanBytes(root.scan.totalBytes) + " found" : "Not scanned yet")).toUpperCase()
@@ -488,7 +610,9 @@ Panel {
           Text {
             id: heroSize
             textFormat: Text.PlainText
-            text: root.tab === "memory"
+            text: root.tab === "checkup"
+              ? (root.checkup ? (root.checkupProblems > 0 ? root.checkupProblems + " issue" + (root.checkupProblems > 1 ? "s" : "") : "All good") : "—")
+              : root.tab === "memory"
               ? (root.memory ? root.humanBytes(root.memory.ram.availableBytes) : "—")
               : (root.scan ? root.humanBytes(root.pickedBytes) : "—")
             color: root.bar.foreground
@@ -507,11 +631,12 @@ Panel {
           spacing: Style.space(6)
 
           Repeater {
-            model: [ { id: "disk", title: "Disk", icon: "\uf0a0" }, { id: "memory", title: "Memory", icon: "\uf2db" } ]
+            model: [ { id: "disk", title: "Disk", icon: "\uf0a0" }, { id: "memory", title: "Memory", icon: "\uf2db" },
+                     { id: "checkup", title: "Checkup", icon: "󰄬" } ]
 
             Button {
               required property var modelData
-              width: (tabRow.width - tabRow.spacing) / 2
+              width: (tabRow.width - tabRow.spacing * 2) / 3
               text: modelData.title
               iconText: modelData.icon
               bordered: true
@@ -1169,6 +1294,227 @@ Panel {
                   onClicked: root.quitProcess({ pid: modelData.pid, comm: modelData.comm, quittable: true }, true)
                 }
               }
+            }
+          }
+        }
+
+        // ---------- Checkup view ----------
+        Column {
+          id: checkupView
+          visible: root.tab === "checkup"
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          Flickable {
+            id: checkScroll
+            width: parent.width
+            height: Math.min(checkList.implicitHeight, Style.space(460))
+            contentHeight: checkList.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+              id: checkList
+              width: checkScroll.width
+              spacing: Style.space(4)
+
+              Text {
+                visible: root.checks.length === 0
+                text: root.checking ? "Checking backups and system health…" : "Press Recheck."
+                color: root.bar.foreground
+                opacity: 0.6
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: root.checks
+
+                Column {
+                  id: checkRow
+                  required property var modelData
+                  width: checkList.width
+                  spacing: Style.space(2)
+
+                  Item {
+                    width: parent.width
+                    implicitHeight: Math.max(checkIcon.implicitHeight, checkText.implicitHeight) + Style.space(6)
+
+                    Text {
+                      id: checkIcon
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(22)
+                      text: root.statusIcon(checkRow.modelData.status)
+                      color: root.statusColor(checkRow.modelData.status)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.title
+                    }
+
+                    Column {
+                      id: checkText
+                      anchors.left: checkIcon.right
+                      anchors.leftMargin: Style.space(8)
+                      anchors.right: checkCount.left
+                      anchors.rightMargin: Style.space(8)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(1)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        text: checkRow.modelData.title
+                        color: root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        elide: Text.ElideRight
+                        width: parent.width
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        text: checkRow.modelData.description
+                        color: root.bar.foreground
+                        opacity: 0.6
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                        width: parent.width
+                      }
+                    }
+
+                    Text {
+                      id: checkCount
+                      textFormat: Text.PlainText
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: checkRow.modelData.errors + checkRow.modelData.warnings > 0
+                        ? String(checkRow.modelData.errors + checkRow.modelData.warnings)
+                        : (checkRow.modelData.status === "info" ? String(checkRow.modelData.count) : "OK")
+                      color: root.statusColor(checkRow.modelData.status)
+                      opacity: checkRow.modelData.status === "ok" ? 0.5 : 1
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: checkRow.modelData.count > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: if (checkRow.modelData.count > 0) root.toggleCheckExpanded(checkRow.modelData)
+                    }
+                  }
+
+                  Column {
+                    visible: root.isCheckExpanded(checkRow.modelData) && checkRow.modelData.items.length > 0
+                    width: parent.width - Style.space(30)
+                    x: Style.space(30)
+                    spacing: Style.space(2)
+
+                    Repeater {
+                      model: checkRow.modelData.items
+
+                      Item {
+                        required property var modelData
+                        width: parent.width
+                        implicitHeight: Math.max(itemCol.implicitHeight, Style.space(22)) + Style.space(2)
+
+                        Text {
+                          id: itemIcon
+                          textFormat: Text.PlainText
+                          anchors.left: parent.left
+                          anchors.top: itemCol.top
+                          width: Style.space(16)
+                          text: root.statusIcon(modelData.status)
+                          color: root.statusColor(modelData.status)
+                          opacity: modelData.status === "ok" ? 0.5 : 1
+                          font.family: root.bar.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        Column {
+                          id: itemCol
+                          anchors.left: itemIcon.right
+                          anchors.leftMargin: Style.space(4)
+                          anchors.right: itemOpen.left
+                          anchors.rightMargin: Style.space(4)
+                          anchors.verticalCenter: parent.verticalCenter
+
+                          Text {
+                            textFormat: Text.PlainText
+                            text: modelData.label
+                            color: root.bar.foreground
+                            opacity: modelData.status === "ok" ? 0.6 : 0.9
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            elide: Text.ElideMiddle
+                            width: parent.width
+                          }
+                          Text {
+                            visible: modelData.detail !== ""
+                            textFormat: Text.PlainText
+                            text: modelData.detail
+                            color: root.bar.foreground
+                            opacity: 0.55
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                          }
+                        }
+
+                        PanelActionButton {
+                          id: itemOpen
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          visible: modelData.path !== ""
+                          iconText: ""
+                          tooltipText: "Open folder"
+                          foreground: root.bar.foreground
+                          fontFamily: root.bar.fontFamily
+                          fontSize: Style.font.caption
+                          onClicked: root.openLocation(modelData.path + (checkRow.modelData.id === "config-drift" ? "" : "/"))
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              width: root.checkup && root.checkup.canBackup ? (parent.width - parent.spacing) * 0.4 : parent.width
+              text: root.checking ? "Checking…" : "Recheck"
+              iconText: ""
+              iconSpinning: root.checking
+              bordered: true
+              enabled: !root.busy
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              onClicked: root.runCheckup()
+            }
+
+            Button {
+              visible: root.checkup && root.checkup.canBackup
+              width: (parent.width - parent.spacing) * 0.6
+              text: root.backingUp ? "Backing up…" : "Back up configs now"
+              iconText: "󰁯"
+              iconSpinning: root.backingUp
+              bordered: true
+              enabled: !root.busy
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              onClicked: root.runBackup()
             }
           }
         }

@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-11-11
+
+### Added
+- **Checkup** tab and `omarchy-cleaner checkup [CHECK...] [--json]`: read-only
+  checks for projects (committed, pushed, folders outside git), the config
+  backup's age and push state, failed services, crashes in the last 7 days,
+  pending `.pacnew` merges, and files changed from Omarchy's defaults. Results
+  are stored in `~/.local/state/omarchy-cleaner/checkup.json` and refreshed with
+  the background scan.
+- `omarchy-cleaner checkup backup` and a **Back up configs now** button.
+- A dot on the bar icon when Checkup finds problems.
+- **Leftover config backups** module (`leftover-backups`): backup copies left in
+  `~/.config` by edits and installers, moved to Trash. Off by default.
+- Config keys `projectRoots`, `configBackupRepo` and `backupCommand`.
+- IPC: `showCheckup`, `checkup`.
+
 ## [0.2.1] — 2026-10-21
 
 ### Fixed

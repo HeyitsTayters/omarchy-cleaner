@@ -1,5 +1,10 @@
 # Omarchy Cleaner
 
+> **Fork.** This fork of [momostifler96/omarchy-cleaner](https://github.com/momostifler96/omarchy-cleaner)
+> adds a **Checkup** tab (are your projects and configs backed up, is anything
+> broken?) and a **Leftover config backups** cleaning category. Everything else
+> follows upstream.
+
 Find and reclaim disk space and memory on [Omarchy](https://omarchy.org). Omarchy Cleaner checks app caches, the pacman cache, system logs, crash dumps, Trash, developer caches, Docker leftovers and large files, then removes what you select. A **Memory** tab shows what really uses your RAM, application by application, and lets you quit it cleanly. It adds a bar widget with a panel to the Omarchy shell. Under the panel is a scriptable CLI that you, your scripts or an AI agent can drive.
 
 ![Omarchy Cleaner panel](preview.png)
@@ -95,6 +100,21 @@ rm -rf ~/.config/omarchy-cleaner ~/.local/state/omarchy-cleaner
 - The desktop session (Hyprland, the Omarchy shell, portals, audio…) is never offered for quitting.
 - **Stuck processes** lists stopped processes, which can be force-quit, plus zombie and disk-wait processes, explained since no signal removes them.
 
+**Checkup tab.** Read-only checks that answer "is my work safe, and is anything wrong?". A dot on the bar icon shows when something needs attention: red for errors, accent for warnings.
+
+| Check | Error | Warning |
+|---|---|---|
+| **Projects** | a repository that was never committed or has no remote | unpushed commits, a branch never pushed, uncommitted changes last edited over an hour ago, or a folder with files but no git |
+| **Config backup** | last backup 30+ days ago, or the repo has no remote | last backup 7+ days ago, or backups not pushed |
+| **Failed services** | any failed system or user service | |
+| **Recent crashes** | | programs that dumped core in the last 7 days |
+| **Pending config merges** | | `.pacnew` / `.pacsave` files in `/etc` (merge with `sudo pacdiff`) |
+| **Changed from Omarchy defaults** | | listed for information: files in `~/.config` that differ from Omarchy's copies |
+
+- Project folders default to `~/Work`, `~/Projects`, `~/projects`, `~/src`, `~/code` and `~/dev`. Set your own with `omarchy-cleaner config set projectRoots '["~/Work"]'`. A folder without git that holds repositories is looked inside; folders a parent repository ignores (vendored upstreams, build output) are skipped.
+- The config backup is `~/omarchy-backup` when it is a git repository, or `configBackupRepo`. **Back up configs now** runs its `backup.sh`, or `backupCommand`.
+- Nothing is fetched from the network: "pushed" means compared with the last known state of the remote.
+
 > **Why there is no "Free RAM" button.** The equivalent on Linux is dropping the kernel file cache. It only makes the "free" number look better for a few minutes, while the system re-reads files from disk. It is available under Maintenance → **Drop file cache** for completeness, behind a warning. Quitting what uses memory is what actually frees it.
 
 **Widget settings** (Bar settings, or inline in `~/.config/omarchy/shell.json`):
@@ -120,6 +140,7 @@ rm -rf ~/.config/omarchy-cleaner ~/.local/state/omarchy-cleaner
 | `orphans` | Packages that were installed as dependencies and are no longer needed | 🔒 | | medium |
 | `snapper` | Snapshots past snapper's own `number` retention rule | 🔒 | | medium |
 | `docker` | Stopped containers, unused networks, dangling images, build cache. **Never volumes** | | | medium |
+| `leftover-backups` | Copies such as `*.bak`, `*.before-*`, `*.saved-*`, `*-backup-2026…` in `~/.config` (moved to Trash). Plugin folders are skipped | | | medium |
 | `large-files` | Files over 1 GB in your home folders. **Review only** | | | high |
 
 The pre-selection is a default. Change it permanently with `omarchy-cleaner config set selection '["user-cache","trash"]'`.
@@ -181,6 +202,9 @@ The config file is optional and only written by `omarchy-cleaner config set` and
 | `notifyThresholdMB` | `1024` | minimum reclaimable size before a scheduled scan notifies |
 | `selection` | — | module ids pre-selected by `clean --defaults` and the panel |
 | `ignore` | `[]` | paths or globs never scanned or cleaned |
+| `projectRoots` | see Checkup | JSON array of folders whose projects Checkup inspects |
+| `configBackupRepo` | `~/omarchy-backup` | git repository holding your config backups |
+| `backupCommand` | `<repo>/backup.sh` | command run by **Back up configs now** / `checkup backup` |
 
 ## Security
 
